@@ -1,0 +1,17 @@
+[package]
+name    = "spatialrs-cli"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "spatialrs"
+path = "src/main.rs"
+
+[dependencies]
+anyhow        = { workspace = true }
+serde         = { workspace = true }
+rayon         = { workspace = true }
+csv           = { workspace = true }
+clap          = { workspace = true }
+spatialrs-core = { path = "../spatialrs-core" }
+spatialrs-io   = { path = "../spatialrs-io" }
