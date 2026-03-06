@@ -1,4 +1,4 @@
-use anyhow::Result;
+use anyhow::{bail, Result};
 use ndarray::Array2;
 use rayon::prelude::*;
 use rstar::{PointDistance, RTree, RTreeObject, AABB};
@@ -8,8 +8,8 @@ use serde::Serialize;
 
 pub enum WeightingMode {
     Uniform,
-    Gaussian        { sigma: f64 },
-    Exponential     { decay: f64 },
+    Gaussian { sigma: f64 },
+    Exponential { decay: f64 },
     InverseDistance { epsilon: f64 },
 }
 
@@ -21,9 +21,9 @@ pub enum GraphMode {
 #[derive(Serialize)]
 pub struct AggregationRecord {
     pub cell_i: String,
-    pub dim:    usize,
-    pub value:  f64,
-    pub group:  String,
+    pub dim: usize,
+    pub value: f64,
+    pub group: String,
 }
 
 // ─── rstar integration ────────────────────────────────────────────────────────
@@ -31,7 +31,7 @@ pub struct AggregationRecord {
 #[derive(Clone)]
 struct IndexedPoint {
     coords: [f64; 2],
-    index:  usize,
+    index: usize,
 }
 
 impl RTreeObject for IndexedPoint {
@@ -54,20 +54,25 @@ impl PointDistance for IndexedPoint {
 /// For each cell, aggregate its neighbours' embedding rows using distance-weighted
 /// averaging.  Outputs long-format records: one row per (cell, embedding dim).
 pub fn aggregate_neighbors(
-    coords:    &[[f64; 2]],
-    barcodes:  &[String],
+    coords: &[[f64; 2]],
+    barcodes: &[String],
     embedding: &Array2<f64>,
-    graph:     &GraphMode,
+    graph: &GraphMode,
     weighting: &WeightingMode,
-    group:     &str,
+    group: &str,
 ) -> Result<Vec<AggregationRecord>> {
-    let n   = coords.len();
+    validate_aggregation_inputs(coords, barcodes, embedding, graph)?;
+
+    let n = coords.len();
     let dim = embedding.ncols();
 
     let points: Vec<IndexedPoint> = coords
         .iter()
         .enumerate()
-        .map(|(i, &c)| IndexedPoint { coords: c, index: i })
+        .map(|(i, &c)| IndexedPoint {
+            coords: c,
+            index: i,
+        })
         .collect();
 
     let tree = RTree::bulk_load(points);
@@ -75,7 +80,7 @@ pub fn aggregate_neighbors(
     let records: Vec<AggregationRecord> = (0..n)
         .into_par_iter()
         .flat_map(|i| {
-            let c  = coords[i];
+            let c = coords[i];
             let neighbors: Vec<(usize, f64)> = find_neighbors(&tree, &c, i, graph);
 
             let mut agg = vec![0.0f64; dim];
@@ -102,9 +107,9 @@ pub fn aggregate_neighbors(
                 .enumerate()
                 .map(|(d, v)| AggregationRecord {
                     cell_i: barcodes[i].clone(),
-                    dim:    d,
-                    value:  v,
-                    group:  group.to_string(),
+                    dim: d,
+                    value: v,
+                    group: group.to_string(),
                 })
                 .collect::<Vec<_>>()
         })
@@ -116,8 +121,8 @@ pub fn aggregate_neighbors(
 // ─── helpers ──────────────────────────────────────────────────────────────────
 
 fn find_neighbors(
-    tree:  &RTree<IndexedPoint>,
-    c:     &[f64; 2],
+    tree: &RTree<IndexedPoint>,
+    c: &[f64; 2],
     self_i: usize,
     graph: &GraphMode,
 ) -> Vec<(usize, f64)> {
@@ -129,27 +134,77 @@ fn find_neighbors(
                 .map(|p| (p.index, p.distance_2(c).sqrt()))
                 .collect()
         }
-        GraphMode::Knn(k) => {
-            tree.nearest_neighbor_iter_with_distance_2(c)
-                .filter(|(p, _)| p.index != self_i)
-                .take(*k)
-                .map(|(p, d2)| (p.index, d2.sqrt()))
-                .collect()
-        }
+        GraphMode::Knn(k) => tree
+            .nearest_neighbor_iter_with_distance_2(c)
+            .filter(|(p, _)| p.index != self_i)
+            .take(*k)
+            .map(|(p, d2)| (p.index, d2.sqrt()))
+            .collect(),
     }
 }
 
 fn compute_weight(d: f64, mode: &WeightingMode) -> f64 {
     match mode {
         WeightingMode::Uniform => 1.0,
-        WeightingMode::Gaussian { sigma } => {
-            (-d * d / (2.0 * sigma * sigma)).exp()
+        WeightingMode::Gaussian { sigma } => (-d * d / (2.0 * sigma * sigma)).exp(),
+        WeightingMode::Exponential { decay } => (-decay * d).exp(),
+        WeightingMode::InverseDistance { epsilon } => 1.0 / (d + epsilon),
+    }
+}
+
+fn validate_aggregation_inputs(
+    coords: &[[f64; 2]],
+    barcodes: &[String],
+    embedding: &Array2<f64>,
+    graph: &GraphMode,
+) -> Result<()> {
+    if coords.len() != barcodes.len() {
+        bail!(
+            "coords length ({}) does not match barcodes length ({})",
+            coords.len(),
+            barcodes.len()
+        );
+    }
+    if coords.len() != embedding.nrows() {
+        bail!(
+            "coords length ({}) does not match embedding rows ({})",
+            coords.len(),
+            embedding.nrows()
+        );
+    }
+    if let GraphMode::Radius(radius) = graph {
+        if !radius.is_finite() || *radius <= 0.0 {
+            bail!("radius must be a finite value > 0");
         }
-        WeightingMode::Exponential { decay } => {
-            (-decay * d).exp()
-        }
-        WeightingMode::InverseDistance { epsilon } => {
-            1.0 / (d + epsilon)
-        }
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{aggregate_neighbors, GraphMode, WeightingMode};
+    use ndarray::arr2;
+
+    #[test]
+    fn aggregate_rejects_non_positive_radius() {
+        let coords = [[0.0, 0.0], [1.0, 1.0]];
+        let barcodes = vec!["a".to_string(), "b".to_string()];
+        let embedding = arr2(&[[1.0, 2.0], [3.0, 4.0]]);
+
+        let err = match aggregate_neighbors(
+            &coords,
+            &barcodes,
+            &embedding,
+            &GraphMode::Radius(0.0),
+            &WeightingMode::Uniform,
+            "g",
+        ) {
+            Ok(_) => panic!("expected invalid radius error"),
+            Err(err) => err,
+        };
+
+        assert!(err
+            .to_string()
+            .contains("radius must be a finite value > 0"));
     }
 }

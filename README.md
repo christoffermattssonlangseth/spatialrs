@@ -146,6 +146,58 @@ Cells with no neighbours within the search radius emit zeros.
 
 ---
 
+### `gmm` — Gaussian Mixture Model niche detection
+
+Fits a GMM to an embedding to identify spatial compartments / niches.
+The typical pipeline is:
+
+```bash
+# 1. Build distance-weighted aggregated embedding per cell
+spatialrs aggregate data.h5ad \
+    --embedding X_scVI --radius 30 --weighting gaussian --sigma 15 \
+    --groupby sample --output agg.csv
+
+# 2. Cluster the aggregated embeddings into niches
+spatialrs gmm data.h5ad --agg agg.csv \
+    -k 10 --covariance diagonal --groupby sample \
+    --output niches.csv --output-probs probs.csv
+```
+
+You can also feed the GMM raw obsm embeddings or NMF factors directly:
+
+```bash
+spatialrs gmm data.h5ad --embedding X_scVI -k 10 --groupby sample --output niches.csv
+spatialrs gmm data.h5ad --nmf-w w_factors.csv -k 10 --groupby sample --output niches.csv
+```
+
+**Embedding source** (exactly one required):
+
+| Flag | Description |
+|---|---|
+| `--embedding <obsm_key>` | Load directly from obsm |
+| `--nmf-w <path>` | Load from NMF W factors CSV |
+| `--agg <path>` | Load from aggregation CSV (output of `spatialrs aggregate`) |
+
+**GMM parameters:**
+
+| Flag | Default | Description |
+|---|---|---|
+| `-k / --k` | *(required)* | Number of mixture components (niches) |
+| `--covariance` | `diagonal` | `diagonal` or `spherical` covariance |
+| `--max-iter` | 200 | Maximum EM iterations |
+| `--tol` | 1e-6 | Convergence tolerance on log-likelihood change |
+| `--seed` | 42 | RNG seed for K-means++ initialisation |
+| `--reg-covar` | 1e-6 | Regularisation added to variance to prevent singularity |
+| `--groupby` | `sample` | Obs column; GMM is fit independently per group |
+
+**Outputs:**
+- `--output` — hard assignments: `cell_i, niche, group`
+- `--output-probs` *(optional)* — soft responsibilities: `cell_i, component, probability, group`
+
+Convergence status (log-likelihood, iterations) is printed to stderr per group.
+
+---
+
 ## Input format
 
 Standard `.h5ad` files written by AnnData (Python).

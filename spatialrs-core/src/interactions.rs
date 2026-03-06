@@ -1,5 +1,5 @@
 use crate::neighbors::radius_graph_dedup;
-use anyhow::Result;
+use anyhow::{bail, Result};
 use serde::Serialize;
 use std::collections::HashMap;
 
@@ -20,6 +20,21 @@ pub fn count_interactions(
     radius: f64,
     group: &str,
 ) -> Result<Vec<InteractionRecord>> {
+    if coords.len() != barcodes.len() {
+        bail!(
+            "coords length ({}) does not match barcodes length ({})",
+            coords.len(),
+            barcodes.len()
+        );
+    }
+    if barcodes.len() != cell_types.len() {
+        bail!(
+            "barcodes length ({}) does not match cell_types length ({})",
+            barcodes.len(),
+            cell_types.len()
+        );
+    }
+
     let edges = radius_graph_dedup(coords, barcodes, radius, group)?;
 
     // Build barcode → cell_type lookup
@@ -54,4 +69,24 @@ pub fn count_interactions(
         .collect();
 
     Ok(records)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::count_interactions;
+
+    #[test]
+    fn interactions_reject_non_positive_radius() {
+        let coords = [[0.0, 0.0], [1.0, 1.0]];
+        let barcodes = vec!["a".to_string(), "b".to_string()];
+        let cell_types = vec!["t1".to_string(), "t2".to_string()];
+
+        let err = match count_interactions(&coords, &barcodes, &cell_types, -1.0, "g") {
+            Ok(_) => panic!("expected invalid radius error"),
+            Err(err) => err,
+        };
+        assert!(err
+            .to_string()
+            .contains("radius must be a finite value > 0"));
+    }
 }

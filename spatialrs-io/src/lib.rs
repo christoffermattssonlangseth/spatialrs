@@ -29,10 +29,9 @@ pub fn read_h5ad(
     obsm_keys: &[&str],
     load_expression: bool,
 ) -> Result<AnnData> {
-    let file = hdf5::File::open(path)
-        .with_context(|| format!("cannot open {:?}", path))?;
+    let file = hdf5::File::open(path).with_context(|| format!("cannot open {:?}", path))?;
 
-    let obs_names   = read_obs_names(&file)?;
+    let obs_names = read_obs_names(&file)?;
     let coordinates = read_spatial(&file)?;
 
     if obs_names.len() != coordinates.nrows() {
@@ -45,8 +44,13 @@ pub fn read_h5ad(
 
     let mut obs = HashMap::new();
     for col in obs_cols {
-        let values = read_obs_column(&file, col)
-            .with_context(|| format!("reading obs column '{col}'"))?;
+        let values =
+            read_obs_column(&file, col).with_context(|| format!("reading obs column '{col}'"))?;
+        ensure_row_count(
+            &format!("obs column '{col}'"),
+            values.len(),
+            obs_names.len(),
+        )?;
         obs.insert(col.to_string(), values);
     }
 
@@ -57,22 +61,28 @@ pub fn read_h5ad(
     };
 
     let expression = if load_expression {
-        Some(
-            read_expression_matrix(&file)
-                .context("reading expression matrix X")?,
-        )
+        let expression = read_expression_matrix(&file).context("reading expression matrix X")?;
+        ensure_row_count("expression matrix X", expression.nrows(), obs_names.len())?;
+        Some(expression)
     } else {
         None
     };
 
     let mut embeddings = HashMap::new();
     for key in obsm_keys {
-        let emb = read_obsm_embedding(&file, key)
-            .with_context(|| format!("reading obsm/{key}"))?;
+        let emb = read_obsm_embedding(&file, key).with_context(|| format!("reading obsm/{key}"))?;
+        ensure_row_count(&format!("obsm/{key}"), emb.nrows(), obs_names.len())?;
         embeddings.insert(key.to_string(), emb);
     }
 
-    Ok(AnnData { obs_names, var_names, coordinates, obs, expression, embeddings })
+    Ok(AnnData {
+        obs_names,
+        var_names,
+        coordinates,
+        obs,
+        expression,
+        embeddings,
+    })
 }
 
 // ─── helpers ─────────────────────────────────────────────────────────────────
@@ -82,25 +92,29 @@ fn read_obs_names(file: &hdf5::File) -> Result<Vec<String>> {
 
     // Strategy 1: dataset at obs/_index
     if let Ok(ds) = obs.dataset("_index") {
-        return ds.read_1d::<hdf5::types::VarLenUnicode>()
+        return ds
+            .read_1d::<hdf5::types::VarLenUnicode>()
             .map(|a| a.iter().map(|s| s.to_string()).collect())
             .context("reading obs/_index");
     }
 
     // Strategy 2: dataset at obs/index
     if let Ok(ds) = obs.dataset("index") {
-        return ds.read_1d::<hdf5::types::VarLenUnicode>()
+        return ds
+            .read_1d::<hdf5::types::VarLenUnicode>()
             .map(|a| a.iter().map(|s| s.to_string()).collect())
             .context("reading obs/index");
     }
 
     // Strategy 3: check _index attribute on the obs group for the real dataset name
     if let Ok(attr) = obs.attr("_index") {
-        let name: hdf5::types::VarLenUnicode = attr.read_scalar()
-            .context("reading obs _index attribute")?;
-        let ds = obs.dataset(name.as_str())
+        let name: hdf5::types::VarLenUnicode =
+            attr.read_scalar().context("reading obs _index attribute")?;
+        let ds = obs
+            .dataset(name.as_str())
             .with_context(|| format!("obs dataset '{}' (from _index attr)", name))?;
-        return ds.read_1d::<hdf5::types::VarLenUnicode>()
+        return ds
+            .read_1d::<hdf5::types::VarLenUnicode>()
             .map(|a| a.iter().map(|s| s.to_string()).collect())
             .with_context(|| format!("reading obs/{}", name));
     }
@@ -112,23 +126,27 @@ fn read_var_names(file: &hdf5::File) -> Result<Vec<String>> {
     let var = file.group("var").context("no 'var' group")?;
 
     if let Ok(ds) = var.dataset("_index") {
-        return ds.read_1d::<hdf5::types::VarLenUnicode>()
+        return ds
+            .read_1d::<hdf5::types::VarLenUnicode>()
             .map(|a| a.iter().map(|s| s.to_string()).collect())
             .context("reading var/_index");
     }
 
     if let Ok(ds) = var.dataset("index") {
-        return ds.read_1d::<hdf5::types::VarLenUnicode>()
+        return ds
+            .read_1d::<hdf5::types::VarLenUnicode>()
             .map(|a| a.iter().map(|s| s.to_string()).collect())
             .context("reading var/index");
     }
 
     if let Ok(attr) = var.attr("_index") {
-        let name: hdf5::types::VarLenUnicode = attr.read_scalar()
-            .context("reading var _index attribute")?;
-        let ds = var.dataset(name.as_str())
+        let name: hdf5::types::VarLenUnicode =
+            attr.read_scalar().context("reading var _index attribute")?;
+        let ds = var
+            .dataset(name.as_str())
             .with_context(|| format!("var dataset '{}' (from _index attr)", name))?;
-        return ds.read_1d::<hdf5::types::VarLenUnicode>()
+        return ds
+            .read_1d::<hdf5::types::VarLenUnicode>()
             .map(|a| a.iter().map(|s| s.to_string()).collect())
             .with_context(|| format!("reading var/{}", name));
     }
@@ -165,7 +183,8 @@ fn slice_two_cols_f64(arr: Array2<f64>) -> Result<Array2<f64>> {
 /// Read a full obsm embedding (all columns) as f64.
 fn read_obsm_embedding(file: &hdf5::File, key: &str) -> Result<Array2<f64>> {
     let obsm = file.group("obsm").context("no 'obsm' group")?;
-    let ds   = obsm.dataset(key)
+    let ds = obsm
+        .dataset(key)
         .with_context(|| format!("obsm/{key} not found"))?;
 
     if let Ok(arr) = ds.read_2d::<f64>() {
@@ -195,18 +214,17 @@ fn read_expression_matrix(file: &hdf5::File) -> Result<Array2<f32>> {
                 bail!("X/data is not f32 or f64");
             };
 
-            let indices = read_usize_vec(&indices_ds)
-                .context("reading X/indices")?;
-            let indptr  = read_usize_vec(&indptr_ds)
-                .context("reading X/indptr")?;
+            let indices = read_usize_vec(&indices_ds).context("reading X/indices")?;
+            let indptr = read_usize_vec(&indptr_ds).context("reading X/indptr")?;
 
             // Read shape from attribute
             let (n_obs, n_var) = read_csr_shape(&grp)?;
+            validate_csr_layout(n_obs, n_var, data.len(), &indices, &indptr)?;
 
             let mut dense = Array2::<f32>::zeros((n_obs, n_var));
             for row in 0..n_obs {
                 let start = indptr[row];
-                let end   = indptr[row + 1];
+                let end = indptr[row + 1];
                 for k in start..end {
                     let col = indices[k];
                     dense[[row, col]] = data[k];
@@ -228,27 +246,37 @@ fn read_expression_matrix(file: &hdf5::File) -> Result<Array2<f32>> {
 }
 
 fn read_usize_vec(ds: &hdf5::Dataset) -> Result<Vec<usize>> {
-    if let Ok(a) = ds.read_1d::<i32>()  { return Ok(a.iter().map(|&v| v as usize).collect()); }
-    if let Ok(a) = ds.read_1d::<i64>()  { return Ok(a.iter().map(|&v| v as usize).collect()); }
-    if let Ok(a) = ds.read_1d::<u32>()  { return Ok(a.iter().map(|&v| v as usize).collect()); }
-    if let Ok(a) = ds.read_1d::<u64>()  { return Ok(a.iter().map(|&v| v as usize).collect()); }
+    if let Ok(a) = ds.read_1d::<i32>() {
+        return a.iter().map(|&v| checked_i32_to_usize(v)).collect();
+    }
+    if let Ok(a) = ds.read_1d::<i64>() {
+        return a.iter().map(|&v| checked_i64_to_usize(v)).collect();
+    }
+    if let Ok(a) = ds.read_1d::<u32>() {
+        return Ok(a.iter().map(|&v| v as usize).collect());
+    }
+    if let Ok(a) = ds.read_1d::<u64>() {
+        return Ok(a.iter().map(|&v| v as usize).collect());
+    }
     bail!("integer dataset could not be read as i32, i64, u32, or u64")
 }
 
 fn read_csr_shape(grp: &hdf5::Group) -> Result<(usize, usize)> {
-    let attr = grp.attr("shape").context("X group has no 'shape' attribute")?;
+    let attr = grp
+        .attr("shape")
+        .context("X group has no 'shape' attribute")?;
 
     if let Ok(s) = attr.read_1d::<i64>() {
         let v = s.to_vec();
-        return Ok((v[0] as usize, v[1] as usize));
+        return parse_shape_pair_i64(&v);
     }
     if let Ok(s) = attr.read_1d::<i32>() {
         let v = s.to_vec();
-        return Ok((v[0] as usize, v[1] as usize));
+        return parse_shape_pair_i32(&v);
     }
     if let Ok(s) = attr.read_1d::<u64>() {
         let v = s.to_vec();
-        return Ok((v[0] as usize, v[1] as usize));
+        return parse_shape_pair_u64(&v);
     }
     bail!("X/shape attribute could not be read as integer")
 }
@@ -266,39 +294,329 @@ fn read_obs_column(file: &hdf5::File, col: &str) -> Result<Vec<String>> {
                 .map(|s| s.to_string())
                 .collect();
 
-            let n = codes_ds.size();
-            let codes: Vec<i32> = if let Ok(c) = codes_ds.read_1d::<i8>() {
-                c.iter().map(|&v| v as i32).collect()
-            } else if let Ok(c) = codes_ds.read_1d::<i16>() {
-                c.iter().map(|&v| v as i32).collect()
-            } else {
-                codes_ds.read_1d::<i32>()
-                    .with_context(|| format!("reading codes for obs/{col}"))?
-                    .iter()
-                    .map(|&v| v)
-                    .collect()
-            };
-
-            if codes.len() != n {
-                bail!("code length mismatch for obs/{col}");
-            }
-
-            return codes
-                .iter()
-                .map(|&c| {
-                    categories
-                        .get(c as usize)
-                        .cloned()
-                        .with_context(|| format!("code {c} out of range for obs/{col}"))
-                })
-                .collect();
+            let codes = read_category_codes(&codes_ds)
+                .with_context(|| format!("reading codes for obs/{col}"))?;
+            return decode_categorical_codes(&categories, &codes, col);
         }
     }
 
     // Fallback: direct VarLenUnicode dataset at obs/{col}
-    let ds = obs.dataset(col)
+    let ds = obs
+        .dataset(col)
         .with_context(|| format!("obs/{col} not found"))?;
     ds.read_1d::<hdf5::types::VarLenUnicode>()
         .map(|a| a.iter().map(|s| s.to_string()).collect())
         .with_context(|| format!("reading obs/{col} as VarLenUnicode"))
+}
+
+fn ensure_row_count(label: &str, actual: usize, expected: usize) -> Result<()> {
+    if actual != expected {
+        bail!("{label} row count ({actual}) does not match obs count ({expected})");
+    }
+    Ok(())
+}
+
+fn validate_csr_layout(
+    n_obs: usize,
+    n_var: usize,
+    data_len: usize,
+    indices: &[usize],
+    indptr: &[usize],
+) -> Result<()> {
+    if indptr.len() != n_obs + 1 {
+        bail!(
+            "X/indptr length ({}) does not match n_obs + 1 ({})",
+            indptr.len(),
+            n_obs + 1
+        );
+    }
+    if indptr.first().copied() != Some(0) {
+        bail!("X/indptr must start at 0");
+    }
+    if indices.len() != data_len {
+        bail!(
+            "X/indices length ({}) does not match X/data length ({data_len})",
+            indices.len()
+        );
+    }
+    if indptr[indptr.len() - 1] != data_len {
+        bail!(
+            "X/indptr terminal value ({}) does not match X/data length ({data_len})",
+            indptr[indptr.len() - 1]
+        );
+    }
+    for window in indptr.windows(2) {
+        if window[0] > window[1] {
+            bail!("X/indptr must be monotonically non-decreasing");
+        }
+        if window[1] > data_len {
+            bail!(
+                "X/indptr contains value {} beyond X/data length ({data_len})",
+                window[1]
+            );
+        }
+    }
+    for &col in indices {
+        if col >= n_var {
+            bail!("X/indices contains column {col} outside matrix width ({n_var})");
+        }
+    }
+    Ok(())
+}
+
+fn checked_i32_to_usize(value: i32) -> Result<usize> {
+    if value < 0 {
+        bail!("integer dataset contains negative value {value}");
+    }
+    Ok(value as usize)
+}
+
+fn checked_i64_to_usize(value: i64) -> Result<usize> {
+    if value < 0 {
+        bail!("integer dataset contains negative value {value}");
+    }
+    Ok(value as usize)
+}
+
+fn parse_shape_pair_i64(values: &[i64]) -> Result<(usize, usize)> {
+    if values.len() != 2 {
+        bail!("X/shape attribute must have exactly 2 elements");
+    }
+    Ok((
+        checked_i64_to_usize(values[0])?,
+        checked_i64_to_usize(values[1])?,
+    ))
+}
+
+fn parse_shape_pair_i32(values: &[i32]) -> Result<(usize, usize)> {
+    if values.len() != 2 {
+        bail!("X/shape attribute must have exactly 2 elements");
+    }
+    Ok((
+        checked_i32_to_usize(values[0])?,
+        checked_i32_to_usize(values[1])?,
+    ))
+}
+
+fn parse_shape_pair_u64(values: &[u64]) -> Result<(usize, usize)> {
+    if values.len() != 2 {
+        bail!("X/shape attribute must have exactly 2 elements");
+    }
+    Ok((values[0] as usize, values[1] as usize))
+}
+
+fn read_category_codes(ds: &hdf5::Dataset) -> Result<Vec<i64>> {
+    if let Ok(c) = ds.read_1d::<i8>() {
+        return Ok(c.iter().map(|&v| v as i64).collect());
+    }
+    if let Ok(c) = ds.read_1d::<i16>() {
+        return Ok(c.iter().map(|&v| v as i64).collect());
+    }
+    if let Ok(c) = ds.read_1d::<i32>() {
+        return Ok(c.iter().map(|&v| v as i64).collect());
+    }
+    if let Ok(c) = ds.read_1d::<i64>() {
+        return Ok(c.to_vec());
+    }
+    bail!("categorical codes are not i8, i16, i32, or i64")
+}
+
+fn decode_categorical_codes(
+    categories: &[String],
+    codes: &[i64],
+    col: &str,
+) -> Result<Vec<String>> {
+    codes
+        .iter()
+        .map(|&code| match code {
+            -1 => Ok(String::new()),
+            c if c < -1 => bail!("code {c} out of range for obs/{col}"),
+            c => categories
+                .get(c as usize)
+                .cloned()
+                .with_context(|| format!("code {c} out of range for obs/{col}")),
+        })
+        .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{decode_categorical_codes, read_h5ad, validate_csr_layout};
+    use hdf5::types::VarLenUnicode;
+    use hdf5_metno as hdf5;
+    use ndarray::arr2;
+    use std::fs;
+    use std::path::{Path, PathBuf};
+    use std::process;
+    use std::str::FromStr;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[test]
+    fn decode_categorical_codes_maps_missing_values_to_empty_strings() {
+        let values = decode_categorical_codes(
+            &["tumor".to_string(), "stroma".to_string()],
+            &[0, -1, 1],
+            "sample",
+        )
+        .unwrap();
+
+        assert_eq!(values, vec!["tumor", "", "stroma"]);
+    }
+
+    #[test]
+    fn validate_csr_layout_rejects_invalid_indptr_length() {
+        let err = validate_csr_layout(2, 3, 2, &[0, 1], &[0, 2]).unwrap_err();
+        assert!(err
+            .to_string()
+            .contains("X/indptr length (2) does not match n_obs + 1 (3)"));
+    }
+
+    #[test]
+    fn validate_csr_layout_rejects_non_monotonic_indptr() {
+        let err = validate_csr_layout(3, 3, 2, &[0, 1], &[0, 2, 1, 2]).unwrap_err();
+        assert!(err
+            .to_string()
+            .contains("X/indptr must be monotonically non-decreasing"));
+    }
+
+    #[test]
+    fn validate_csr_layout_rejects_terminal_count_mismatch() {
+        let err = validate_csr_layout(2, 3, 2, &[0, 1], &[0, 1, 1]).unwrap_err();
+        assert!(err
+            .to_string()
+            .contains("X/indptr terminal value (1) does not match X/data length (2)"));
+    }
+
+    #[test]
+    fn validate_csr_layout_rejects_out_of_bounds_indices() {
+        let err = validate_csr_layout(2, 2, 1, &[2], &[0, 1, 1]).unwrap_err();
+        assert!(err
+            .to_string()
+            .contains("X/indices contains column 2 outside matrix width (2)"));
+    }
+
+    #[test]
+    fn read_h5ad_rejects_obs_column_row_mismatch() {
+        with_temp_path("obs-row-mismatch", |path| {
+            let file = create_base_h5ad(path);
+            let obs = file.group("obs").unwrap();
+            write_string_dataset(&obs, "sample", &["s1"]);
+            drop(file);
+
+            let err = match read_h5ad(path, &["sample"], &[], false) {
+                Ok(_) => panic!("expected obs row count mismatch"),
+                Err(err) => err,
+            };
+            assert!(err
+                .to_string()
+                .contains("obs column 'sample' row count (1) does not match obs count (2)"));
+        });
+    }
+
+    #[test]
+    fn read_h5ad_rejects_embedding_row_mismatch() {
+        with_temp_path("embedding-row-mismatch", |path| {
+            let file = create_base_h5ad(path);
+            let obsm = file.group("obsm").unwrap();
+            obsm.new_dataset_builder()
+                .with_data(&arr2(&[[1.0, 2.0]]))
+                .create("X_pca")
+                .unwrap();
+            drop(file);
+
+            let err = match read_h5ad(path, &[], &["X_pca"], false) {
+                Ok(_) => panic!("expected embedding row count mismatch"),
+                Err(err) => err,
+            };
+            assert!(err
+                .to_string()
+                .contains("obsm/X_pca row count (1) does not match obs count (2)"));
+        });
+    }
+
+    #[test]
+    fn read_h5ad_rejects_expression_row_mismatch() {
+        with_temp_path("expression-row-mismatch", |path| {
+            let file = create_base_h5ad(path);
+            file.new_dataset_builder()
+                .with_data(&arr2(&[[1.0f32, 2.0f32]]))
+                .create("X")
+                .unwrap();
+            drop(file);
+
+            let err = match read_h5ad(path, &[], &[], true) {
+                Ok(_) => panic!("expected expression row count mismatch"),
+                Err(err) => err,
+            };
+            assert!(err
+                .to_string()
+                .contains("expression matrix X row count (1) does not match obs count (2)"));
+        });
+    }
+
+    #[test]
+    fn read_h5ad_allows_missing_categorical_codes() {
+        with_temp_path("categorical-missing", |path| {
+            let file = create_base_h5ad(path);
+            let obs = file.group("obs").unwrap();
+            let sample = obs.create_group("sample").unwrap();
+            sample
+                .new_dataset_builder()
+                .with_data(&[0i32, -1i32])
+                .create("codes")
+                .unwrap();
+            write_string_dataset(&sample, "categories", &["tumor"]);
+            drop(file);
+
+            let adata = read_h5ad(path, &["sample"], &[], false).unwrap();
+            assert_eq!(
+                adata.obs["sample"],
+                vec!["tumor".to_string(), String::new()]
+            );
+        });
+    }
+
+    fn create_base_h5ad(path: &Path) -> hdf5::File {
+        let file = hdf5::File::create(path).unwrap();
+
+        let obs = file.create_group("obs").unwrap();
+        write_string_dataset(&obs, "_index", &["cell1", "cell2"]);
+
+        let var = file.create_group("var").unwrap();
+        write_string_dataset(&var, "_index", &["gene1", "gene2"]);
+
+        let obsm = file.create_group("obsm").unwrap();
+        obsm.new_dataset_builder()
+            .with_data(&arr2(&[[0.0f64, 0.0f64], [1.0f64, 1.0f64]]))
+            .create("spatial")
+            .unwrap();
+
+        file
+    }
+
+    fn write_string_dataset(parent: &hdf5::Group, name: &str, values: &[&str]) {
+        let encoded: Vec<VarLenUnicode> = values
+            .iter()
+            .map(|value| VarLenUnicode::from_str(value).unwrap())
+            .collect();
+        parent
+            .new_dataset_builder()
+            .with_data(&encoded)
+            .create(name)
+            .unwrap();
+    }
+
+    fn with_temp_path(name: &str, f: impl FnOnce(&Path)) {
+        let path = temp_path(name);
+        f(&path);
+        let _ = fs::remove_file(&path);
+    }
+
+    fn temp_path(name: &str) -> PathBuf {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        std::env::temp_dir().join(format!("spatialrs-{name}-{}-{nanos}.h5ad", process::id()))
+    }
 }

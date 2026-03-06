@@ -1,4 +1,4 @@
-use anyhow::Result;
+use anyhow::{bail, Result};
 use rayon::prelude::*;
 use rstar::{PointDistance, RTree, RTreeObject, AABB};
 use serde::Serialize;
@@ -46,10 +46,16 @@ pub fn radius_graph(
     radius: f64,
     group: &str,
 ) -> Result<Vec<EdgeRecord>> {
+    validate_input_lengths(coords.len(), barcodes.len())?;
+    validate_positive_radius(radius)?;
+
     let points: Vec<IndexedPoint> = coords
         .iter()
         .enumerate()
-        .map(|(i, &c)| IndexedPoint { coords: c, index: i })
+        .map(|(i, &c)| IndexedPoint {
+            coords: c,
+            index: i,
+        })
         .collect();
 
     let tree = RTree::bulk_load(points);
@@ -61,7 +67,7 @@ pub fn radius_graph(
         .enumerate()
         .flat_map(|(i, c)| {
             tree.locate_within_distance(*c, r2)
-                .filter(|p| p.index > i)           // upper triangle only
+                .filter(|p| p.index > i) // upper triangle only
                 .map(|p| {
                     let d = (p.distance_2(c) as f64).sqrt();
                     (i, p.index, d)
@@ -97,10 +103,16 @@ pub(crate) fn radius_graph_dedup(
     radius: f64,
     group: &str,
 ) -> Result<Vec<EdgeRecord>> {
+    validate_input_lengths(coords.len(), barcodes.len())?;
+    validate_positive_radius(radius)?;
+
     let points: Vec<IndexedPoint> = coords
         .iter()
         .enumerate()
-        .map(|(i, &c)| IndexedPoint { coords: c, index: i })
+        .map(|(i, &c)| IndexedPoint {
+            coords: c,
+            index: i,
+        })
         .collect();
 
     let tree = RTree::bulk_load(points);
@@ -138,10 +150,15 @@ pub fn knn_graph(
     k: usize,
     group: &str,
 ) -> Result<Vec<EdgeRecord>> {
+    validate_input_lengths(coords.len(), barcodes.len())?;
+
     let points: Vec<IndexedPoint> = coords
         .iter()
         .enumerate()
-        .map(|(i, &c)| IndexedPoint { coords: c, index: i })
+        .map(|(i, &c)| IndexedPoint {
+            coords: c,
+            index: i,
+        })
         .collect();
 
     let tree = RTree::bulk_load(points);
@@ -151,7 +168,7 @@ pub fn knn_graph(
         .enumerate()
         .flat_map(|(i, c)| {
             tree.nearest_neighbor_iter_with_distance_2(c)
-                .filter(|(p, _)| p.index != i)   // skip self
+                .filter(|(p, _)| p.index != i) // skip self
                 .take(k)
                 .map(|(p, d2)| EdgeRecord {
                     cell_i: barcodes[i].clone(),
@@ -164,4 +181,45 @@ pub fn knn_graph(
         .collect();
 
     Ok(records)
+}
+
+fn validate_input_lengths(n_coords: usize, n_barcodes: usize) -> Result<()> {
+    if n_coords != n_barcodes {
+        bail!("coords length ({n_coords}) does not match barcodes length ({n_barcodes})");
+    }
+    Ok(())
+}
+
+fn validate_positive_radius(radius: f64) -> Result<()> {
+    if !radius.is_finite() || radius <= 0.0 {
+        bail!("radius must be a finite value > 0");
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::radius_graph;
+
+    #[test]
+    fn radius_graph_rejects_non_positive_radius() {
+        let coords = [[0.0, 0.0], [1.0, 1.0]];
+        let barcodes = vec!["a".to_string(), "b".to_string()];
+
+        let err = match radius_graph(&coords, &barcodes, 0.0, "g") {
+            Ok(_) => panic!("expected invalid radius error"),
+            Err(err) => err,
+        };
+        assert!(err
+            .to_string()
+            .contains("radius must be a finite value > 0"));
+
+        let err = match radius_graph(&coords, &barcodes, -1.0, "g") {
+            Ok(_) => panic!("expected invalid radius error"),
+            Err(err) => err,
+        };
+        assert!(err
+            .to_string()
+            .contains("radius must be a finite value > 0"));
+    }
 }

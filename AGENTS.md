@@ -41,6 +41,18 @@ Both commands must succeed with zero errors and zero warnings before committing.
 
 ---
 
+## Typical spatial niche pipeline
+
+```bash
+spatialrs nmf data.h5ad --n-components 20 --groupby sample --output-w w.csv
+spatialrs aggregate data.h5ad --nmf-w w.csv --radius 30 --weighting gaussian --sigma 15 --groupby sample --output agg.csv
+spatialrs gmm data.h5ad --agg agg.csv -k 10 --covariance diagonal --groupby sample --output niches.csv
+```
+
+Each step is independent and outputs a flat CSV, making them easy to inspect or substitute.
+
+---
+
 ## Key patterns
 
 ### Reading h5ad data
@@ -58,6 +70,16 @@ Use `rstar::RTree` with the `IndexedPoint` pattern (see `neighbors.rs` or `aggre
 
 ### NMF
 Uses `ndarray::Zip::par_for_each` for element-wise updates (requires `ndarray` rayon feature). Matrix multiplications are via `Array2::dot`. Convergence is checked every 10 iterations using Frobenius norm. W shape: `(n_obs, k)`; H shape: `(k, n_var)`.
+
+### GMM
+EM algorithm in `spatialrs-core/src/gmm.rs`. E-step is parallelized over cells with rayon. Variances are always stored as `Array2<f64>` of shape `(K, D)` — for spherical covariance, all columns in a row hold the same scalar. K-means++ initialisation. Convergence checked every iteration on log-likelihood change. Outputs hard labels (`labels: Vec<usize>`) and soft responsibilities (`Array2<f64>` N×K).
+
+### Embedding sources in `aggregate` and `gmm`
+Both subcommands accept three embedding sources via CLI flags:
+- `--embedding <key>` → load from obsm in the h5ad
+- `--nmf-w <path>` → pivot NMF W CSV (long format) into dense matrix via `read_nmf_w_embedding`
+- `--agg <path>` → pivot aggregation CSV (long format) into dense matrix via `read_agg_embedding`
+Both helper functions are in `spatialrs-cli/src/main.rs` and validate against obs_names from the h5ad.
 
 ---
 

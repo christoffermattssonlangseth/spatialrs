@@ -1,5 +1,5 @@
 use crate::neighbors::radius_graph;
-use anyhow::Result;
+use anyhow::{bail, Result};
 use serde::Serialize;
 use std::collections::HashMap;
 
@@ -21,6 +21,21 @@ pub fn compute_composition(
     radius: f64,
     group: &str,
 ) -> Result<Vec<CompositionRecord>> {
+    if coords.len() != barcodes.len() {
+        bail!(
+            "coords length ({}) does not match barcodes length ({})",
+            coords.len(),
+            barcodes.len()
+        );
+    }
+    if barcodes.len() != cell_types.len() {
+        bail!(
+            "barcodes length ({}) does not match cell_types length ({})",
+            barcodes.len(),
+            cell_types.len()
+        );
+    }
+
     // Bidirectional edges so iterating by cell_i gives all neighbours
     let edges = radius_graph(coords, barcodes, radius, group)?;
 
@@ -45,7 +60,7 @@ pub fn compute_composition(
     for barcode in barcodes {
         let neighbours = match neighbour_map.get(barcode.as_str()) {
             Some(nb) => nb,
-            None => continue,   // isolated cell — skip
+            None => continue, // isolated cell — skip
         };
 
         let total = neighbours.len() as f64;
@@ -65,4 +80,24 @@ pub fn compute_composition(
     }
 
     Ok(records)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::compute_composition;
+
+    #[test]
+    fn composition_rejects_non_positive_radius() {
+        let coords = [[0.0, 0.0], [1.0, 1.0]];
+        let barcodes = vec!["a".to_string(), "b".to_string()];
+        let cell_types = vec!["t1".to_string(), "t2".to_string()];
+
+        let err = match compute_composition(&coords, &barcodes, &cell_types, 0.0, "g") {
+            Ok(_) => panic!("expected invalid radius error"),
+            Err(err) => err,
+        };
+        assert!(err
+            .to_string()
+            .contains("radius must be a finite value > 0"));
+    }
 }
