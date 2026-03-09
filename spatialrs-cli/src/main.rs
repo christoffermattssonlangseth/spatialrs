@@ -4,7 +4,6 @@ use indicatif::{MultiProgress, ParallelProgressIterator, ProgressBar, ProgressSt
 use ndarray::Array2;
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
-use std::sync::Arc;
 use spatialrs_core::{
     aggregation::{aggregate_neighbors, AggregationRecord, GraphMode, WeightingMode},
     autocorr::{compute_morans_i, MoranRecord},
@@ -13,11 +12,12 @@ use spatialrs_core::{
     interactions::{count_interactions, permute_interactions, InteractionStatsRecord},
     markers::{find_niche_markers, MarkerRecord},
     neighbors::{knn_graph, radius_graph, EdgeRecord},
-    nmf::{run_nmf, HRecord, NmfConfig, WRecord},
+    nmf::{run_nmf, run_nmf_sparse, HRecord, NmfConfig, WRecord},
 };
 use spatialrs_io::{read_h5ad, AnnData};
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::Arc;
 
 // ─── CLI definition ───────────────────────────────────────────────────────────
 
@@ -53,28 +53,28 @@ struct WInputRecord {
 #[derive(Deserialize)]
 struct AggInputRecord {
     cell_i: String,
-    dim:    usize,
-    value:  f64,
-    group:  String,
+    dim: usize,
+    value: f64,
+    group: String,
 }
 
 #[derive(Deserialize)]
 struct NicheInputRecord {
     cell_i: String,
-    niche:  usize,
+    niche: usize,
     #[allow(dead_code)]
-    group:  String,
+    group: String,
 }
 
 #[derive(Serialize)]
 struct ModelStatsRecord {
-    k:               usize,
-    log_likelihood:  f64,
-    bic:             f64,
-    aic:             f64,
-    n_iter:          usize,
+    k: usize,
+    log_likelihood: f64,
+    bic: f64,
+    aic: f64,
+    n_iter: usize,
     covariance_type: String,
-    group:           String,
+    group: String,
 }
 
 #[derive(Subcommand)]
@@ -152,6 +152,19 @@ enum Command {
         /// Output path for H (gene loading) matrix CSV
         #[arg(long)]
         output_h: Option<PathBuf>,
+        /// var column name to filter genes (e.g. "highly_variable"); keeps only True rows
+        #[arg(long)]
+        var_filter: Option<String>,
+        /// Read from layers/<name> instead of X (e.g. "counts" for raw counts)
+        #[arg(long)]
+        layer: Option<String>,
+        /// Use sparse NMF: keep X in CSR format instead of densifying.
+        /// Requires X stored as a sparse CSR group in the h5ad (standard for
+        /// AnnData written by scanpy/scran).  Recommended for datasets with
+        /// > 200 k cells — reduces memory from O(N×G) to O(nnz) and is
+        /// typically 10-20× faster for typical scRNA-seq sparsity (~95% zeros).
+        #[arg(long, default_value_t = false)]
+        sparse: bool,
     },
     /// Fit a Gaussian Mixture Model to identify spatial niches / compartments
     Gmm {
@@ -208,12 +221,15 @@ enum Command {
         #[arg(long)]
         output: Option<PathBuf>,
     },
-    /// Identify niche marker genes using one-vs-rest Wilcoxon rank-sum tests
+    /// Identify pooled niche marker genes using one-vs-rest Wilcoxon rank-sum tests
     Markers {
         input: PathBuf,
         /// Niche assignments CSV produced by `spatialrs gmm`
         #[arg(long)]
         niche_csv: PathBuf,
+        /// Read from layers/<name> instead of X (e.g. "counts" for raw counts)
+        #[arg(long)]
+        layer: Option<String>,
         #[arg(long)]
         output: Option<PathBuf>,
     },
@@ -262,7 +278,7 @@ fn main() -> Result<()> {
             groupby,
             output,
         } => {
-            let adata = read_h5ad(&input, &[&groupby], &[], false)?;
+            let adata = read_h5ad(&input, &[&groupby], &[], false, false, None, None)?;
             let groups = partition_by_group(&adata, &groupby)?;
 
             let pb = group_bar(groups.len(), "radius");
@@ -288,7 +304,7 @@ fn main() -> Result<()> {
             groupby,
             output,
         } => {
-            let adata = read_h5ad(&input, &[&groupby], &[], false)?;
+            let adata = read_h5ad(&input, &[&groupby], &[], false, false, None, None)?;
             let groups = partition_by_group(&adata, &groupby)?;
 
             let pb = group_bar(groups.len(), "knn");
@@ -318,7 +334,15 @@ fn main() -> Result<()> {
             seed,
             output_stats,
         } => {
-            let adata = read_h5ad(&input, &[&groupby, &cell_type], &[], false)?;
+            let adata = read_h5ad(
+                &input,
+                &[&groupby, &cell_type],
+                &[],
+                false,
+                false,
+                None,
+                None,
+            )?;
             let groups = partition_by_group(&adata, &groupby)?;
 
             let pb = group_bar(groups.len(), "interactions");
@@ -348,8 +372,13 @@ fn main() -> Result<()> {
                         let barcodes = extract_barcodes_subset(&adata, indices);
                         let types = extract_strings_subset(&adata, &cell_type, indices);
                         permute_interactions(
-                            &coords, &barcodes, &types, radius,
-                            n_permutations, seed, label,
+                            &coords,
+                            &barcodes,
+                            &types,
+                            radius,
+                            n_permutations,
+                            seed,
+                            label,
                         )
                     })
                     .collect::<Result<Vec<_>>>()?
@@ -367,7 +396,15 @@ fn main() -> Result<()> {
             groupby,
             output,
         } => {
-            let adata = read_h5ad(&input, &[&groupby, &cell_type], &[], false)?;
+            let adata = read_h5ad(
+                &input,
+                &[&groupby, &cell_type],
+                &[],
+                false,
+                false,
+                None,
+                None,
+            )?;
             let groups = partition_by_group(&adata, &groupby)?;
 
             let pb = group_bar(groups.len(), "composition");
@@ -397,20 +434,31 @@ fn main() -> Result<()> {
             groupby,
             output_w,
             output_h,
+            var_filter,
+            layer,
+            sparse,
         } => {
             let obs_cols: Vec<&str> = groupby.as_deref().into_iter().collect();
-            let adata = read_h5ad(&input, &obs_cols, &[], true)?;
-
-            let x_full = adata
-                .expression
-                .as_ref()
-                .context("expression matrix not loaded")?;
+            let adata = read_h5ad(
+                &input,
+                &obs_cols,
+                &[],
+                !sparse, // load dense unless --sparse
+                sparse,  // load sparse when --sparse
+                var_filter.as_deref(),
+                layer.as_deref(),
+            )?;
 
             // Run NMF once on ALL cells pooled — factors are then comparable across samples.
             // Group label is attached to output records from obs afterwards.
             let n_cells = adata.obs_names.len();
             let multi = MultiProgress::new();
-            let pb = iter_bar(&multi, max_iter, &format!("NMF ({n_cells} cells)"));
+            let mode_label = if sparse { "sparse" } else { "dense" };
+            let pb = iter_bar(
+                &multi,
+                max_iter,
+                &format!("NMF ({n_cells} cells, {mode_label})"),
+            );
             let pb2 = pb.clone();
             let config = NmfConfig {
                 n_components,
@@ -420,11 +468,31 @@ fn main() -> Result<()> {
                 epsilon: 1e-12,
                 iter_cb: Some(Arc::new(move |iter: usize, err: f32| {
                     pb2.set_position(iter as u64);
-                    pb2.set_message(format!("err={err:.2}"));
+                    pb2.set_message(format!("err={err:.2e}"));
                 })),
             };
-            let result = run_nmf(x_full, &config)?;
-            pb.finish_with_message(format!("err={:.2}", result.final_error));
+
+            let result = if sparse {
+                let csr = adata
+                    .sparse_expression
+                    .as_ref()
+                    .context("sparse expression matrix not loaded")?;
+                run_nmf_sparse(
+                    &csr.data,
+                    &csr.indices,
+                    &csr.indptr,
+                    csr.nrows,
+                    csr.ncols,
+                    &config,
+                )?
+            } else {
+                let x_full = adata
+                    .expression
+                    .as_ref()
+                    .context("expression matrix not loaded")?;
+                run_nmf(x_full, &config)?
+            };
+            pb.finish_with_message(format!("err={:.2e}", result.final_error));
 
             let group_col_opt = groupby.as_deref().and_then(|col| adata.obs.get(col));
 
@@ -482,16 +550,15 @@ fn main() -> Result<()> {
             output_model_stats,
         } => {
             let obsm_keys: Vec<&str> = embedding.as_deref().into_iter().collect();
-            let adata = read_h5ad(&input, &[&groupby], &obsm_keys, false)?;
+            let adata = read_h5ad(&input, &[&groupby], &obsm_keys, false, false, None, None)?;
 
             // Build full embedding matrix (N × D) from one of three sources
             let emb_owned: Array2<f64>;
             let emb_full: &Array2<f64> = match (&embedding, &nmf_w, &agg) {
-                (Some(key), None, None) => {
-                    adata.embeddings
-                        .get(key)
-                        .ok_or_else(|| anyhow::anyhow!("embedding '{key}' not loaded"))?
-                }
+                (Some(key), None, None) => adata
+                    .embeddings
+                    .get(key)
+                    .ok_or_else(|| anyhow::anyhow!("embedding '{key}' not loaded"))?,
                 (None, Some(path), None) => {
                     emb_owned = read_nmf_w_embedding(path, &adata, &groupby)?;
                     &emb_owned
@@ -505,7 +572,7 @@ fn main() -> Result<()> {
             };
 
             let cov_type = match covariance {
-                CovarianceArg::Diagonal  => CovarianceType::Diagonal,
+                CovarianceArg::Diagonal => CovarianceType::Diagonal,
                 CovarianceArg::Spherical => CovarianceType::Spherical,
             };
 
@@ -530,27 +597,37 @@ fn main() -> Result<()> {
             let result = run_gmm(emb_full, &config)?;
             pb.finish_with_message(format!("ll={:.1}", result.log_likelihood));
 
-            let group_col = adata.obs.get(&groupby)
+            let group_col = adata
+                .obs
+                .get(&groupby)
                 .ok_or_else(|| anyhow::anyhow!("groupby column '{groupby}' not found in obs"))?;
 
-            let mut niche_records: Vec<NicheRecord>     = Vec::new();
-            let mut prob_records:  Vec<NicheProbRecord> = Vec::new();
+            let mut niche_records: Vec<NicheRecord> = Vec::new();
+            let mut prob_records: Vec<NicheProbRecord> = Vec::new();
 
             for (i, barcode) in adata.obs_names.iter().enumerate() {
-                let group = group_col.get(i).map(|s| s.as_str()).unwrap_or("").to_string();
+                let group = group_col
+                    .get(i)
+                    .map(|s| s.as_str())
+                    .unwrap_or("")
+                    .to_string();
                 niche_records.push(NicheRecord {
                     cell_i: barcode.clone(),
-                    niche:  result.labels[i],
+                    niche: result.labels[i],
                     group,
                 });
                 if output_probs.is_some() {
-                    let group2 = group_col.get(i).map(|s| s.as_str()).unwrap_or("").to_string();
+                    let group2 = group_col
+                        .get(i)
+                        .map(|s| s.as_str())
+                        .unwrap_or("")
+                        .to_string();
                     for comp in 0..k {
                         prob_records.push(NicheProbRecord {
-                            cell_i:      barcode.clone(),
-                            component:   comp,
+                            cell_i: barcode.clone(),
+                            component: comp,
                             probability: result.responsibilities[[i, comp]],
-                            group:       group2.clone(),
+                            group: group2.clone(),
                         });
                     }
                 }
@@ -562,17 +639,17 @@ fn main() -> Result<()> {
             }
             if let Some(ref stats_path) = output_model_stats {
                 let cov_str = match covariance {
-                    CovarianceArg::Diagonal  => "diagonal",
+                    CovarianceArg::Diagonal => "diagonal",
                     CovarianceArg::Spherical => "spherical",
                 };
                 let stats = vec![ModelStatsRecord {
                     k,
                     log_likelihood: result.log_likelihood,
-                    bic:            result.bic,
-                    aic:            result.aic,
-                    n_iter:         result.n_iter,
+                    bic: result.bic,
+                    aic: result.aic,
+                    n_iter: result.n_iter,
                     covariance_type: cov_str.to_string(),
-                    group:          "all".to_string(),
+                    group: "all".to_string(),
                 }];
                 write_csv(&stats, Some(stats_path.as_path()))?;
             }
@@ -587,7 +664,7 @@ fn main() -> Result<()> {
             output,
         } => {
             let obsm_keys: Vec<&str> = embedding.as_deref().into_iter().collect();
-            let adata = read_h5ad(&input, &[&groupby], &obsm_keys, false)?;
+            let adata = read_h5ad(&input, &[&groupby], &obsm_keys, false, false, None, None)?;
 
             let emb_owned: Array2<f64>;
             let emb_full: &Array2<f64> = match (&embedding, &nmf_w) {
@@ -605,7 +682,9 @@ fn main() -> Result<()> {
 
             let feature_names: Vec<String> = match (&embedding, &nmf_w) {
                 (Some(_), _) => (0..emb_full.ncols()).map(|i| format!("dim_{i}")).collect(),
-                _            => (0..emb_full.ncols()).map(|i| format!("component_{i}")).collect(),
+                _ => (0..emb_full.ncols())
+                    .map(|i| format!("component_{i}"))
+                    .collect(),
             };
 
             let groups = partition_by_group(&adata, &groupby)?;
@@ -615,7 +694,7 @@ fn main() -> Result<()> {
                 .par_iter()
                 .progress_with(pb)
                 .map(|(label, indices)| {
-                    let coords  = extract_coords_subset(&adata, indices);
+                    let coords = extract_coords_subset(&adata, indices);
                     let emb_sub = emb_full.select(ndarray::Axis(0), indices);
                     compute_morans_i(&coords, &emb_sub, &feature_names, radius, label)
                 })
@@ -630,11 +709,13 @@ fn main() -> Result<()> {
         Command::Markers {
             input,
             niche_csv,
+            layer,
             output,
         } => {
-            let adata = read_h5ad(&input, &[], &[], true)?;
+            let adata = read_h5ad(&input, &[], &[], true, false, None, layer.as_deref())?;
 
-            // Read niche assignments CSV
+            // Marker testing is pooled across all cells; the niche CSV only
+            // provides the global niche label for each barcode in obs order.
             let mut rdr = csv::Reader::from_path(&niche_csv)
                 .with_context(|| format!("cannot open {:?}", niche_csv))?;
             let mut niche_map: HashMap<String, usize> = HashMap::new();
@@ -659,21 +740,15 @@ fn main() -> Result<()> {
                 })
                 .collect::<Result<Vec<_>>>()?;
 
-            let expression = adata
-                .expression
-                .context("expression matrix not loaded")?;
+            let expression = adata.expression.context("expression matrix not loaded")?;
 
             let n_cells = expression.nrows();
             let n_genes = expression.ncols();
             let pb = group_bar(n_niches, "markers");
             let _ = (n_cells, n_genes, pb); // progress shown inside find_niche_markers via Rayon
 
-            let records: Vec<MarkerRecord> = find_niche_markers(
-                &expression,
-                &adata.var_names,
-                &niche_labels,
-                n_niches,
-            )?;
+            let records: Vec<MarkerRecord> =
+                find_niche_markers(&expression, &adata.var_names, &niche_labels, n_niches)?;
 
             write_csv(&records, output.as_deref())?;
         }
@@ -692,7 +767,7 @@ fn main() -> Result<()> {
             output,
         } => {
             let obsm_keys: Vec<&str> = embedding.as_deref().into_iter().collect();
-            let adata = read_h5ad(&input, &[&groupby], &obsm_keys, false)?;
+            let adata = read_h5ad(&input, &[&groupby], &obsm_keys, false, false, None, None)?;
 
             let graph = match (radius, k) {
                 (Some(r), None) => GraphMode::Radius(r),
@@ -886,8 +961,8 @@ fn read_nmf_w_embedding(
 /// Load an aggregation CSV (output of `spatialrs aggregate`) into a dense N × D matrix.
 /// Rows are ordered by `adata.obs_names`; the group for each cell is looked up from `groupby`.
 fn read_agg_embedding(
-    path:    &std::path::Path,
-    adata:   &AnnData,
+    path: &std::path::Path,
+    adata: &AnnData,
     groupby: &str,
 ) -> Result<Array2<f64>> {
     let groups = adata
@@ -895,8 +970,8 @@ fn read_agg_embedding(
         .get(groupby)
         .with_context(|| format!("obs column '{groupby}' not loaded"))?;
 
-    let mut rdr = csv::Reader::from_path(path)
-        .with_context(|| format!("cannot open {:?}", path))?;
+    let mut rdr =
+        csv::Reader::from_path(path).with_context(|| format!("cannot open {:?}", path))?;
 
     // key: (group, cell_i)  value: per-dim values
     let mut map: HashMap<(String, String), Vec<Option<f64>>> = HashMap::new();
@@ -906,11 +981,9 @@ fn read_agg_embedding(
         let row: AggInputRecord = record.with_context(|| format!("reading {:?}", path))?;
         max_dim = Some(match max_dim {
             Some(m) => m.max(row.dim),
-            None    => row.dim,
+            None => row.dim,
         });
-        let entry = map
-            .entry((row.group, row.cell_i))
-            .or_default();
+        let entry = map.entry((row.group, row.cell_i)).or_default();
         // Extend the vec if needed
         if entry.len() <= row.dim {
             entry.resize(row.dim + 1, None);
@@ -920,25 +993,27 @@ fn read_agg_embedding(
         }
     }
 
-    let n_dims = max_dim
-        .map(|m| m + 1)
-        .context("aggregation CSV is empty")?;
+    let n_dims = max_dim.map(|m| m + 1).context("aggregation CSV is empty")?;
 
     let mut embedding = Array2::<f64>::zeros((adata.obs_names.len(), n_dims));
     for (row_idx, barcode) in adata.obs_names.iter().enumerate() {
         let cell_group = &groups[row_idx];
         let values = map
             .get(&(cell_group.clone(), barcode.clone()))
-            .with_context(|| format!(
-                "missing aggregation row for cell '{}' group '{}' in {:?}",
-                barcode, cell_group, path
-            ))?;
+            .with_context(|| {
+                format!(
+                    "missing aggregation row for cell '{}' group '{}' in {:?}",
+                    barcode, cell_group, path
+                )
+            })?;
 
         for (d, v_opt) in values.iter().enumerate() {
-            embedding[[row_idx, d]] = v_opt.with_context(|| format!(
-                "missing dim {d} for cell '{}' group '{}' in {:?}",
-                barcode, cell_group, path
-            ))?;
+            embedding[[row_idx, d]] = v_opt.with_context(|| {
+                format!(
+                    "missing dim {d} for cell '{}' group '{}' in {:?}",
+                    barcode, cell_group, path
+                )
+            })?;
         }
     }
 
@@ -992,8 +1067,10 @@ fn write_csv<T: Serialize>(records: &[T], output: Option<&std::path::Path>) -> R
 
 #[cfg(test)]
 mod tests {
-    use super::read_nmf_w_embedding;
+    use super::{read_nmf_w_embedding, write_csv};
+    use csv::Reader;
     use ndarray::{arr2, Array2};
+    use spatialrs_core::markers::MarkerRecord;
     use spatialrs_io::AnnData;
     use std::collections::HashMap;
     use std::fs;
@@ -1034,6 +1111,47 @@ mod tests {
         );
     }
 
+    #[test]
+    fn marker_csv_schema_is_pooled_and_has_no_group_column() {
+        let path = temp_path("markers-schema");
+        let records = vec![MarkerRecord {
+            niche: 0,
+            gene: "gene_a".to_string(),
+            mean_niche: 1.0,
+            mean_rest: 0.5,
+            log2fc: 1.0,
+            z_score: 2.0,
+            p_value: 0.01,
+            q_value_bh: 0.02,
+        }];
+
+        write_csv(&records, Some(path.as_path())).unwrap();
+
+        let mut rdr = Reader::from_path(&path).unwrap();
+        let headers = rdr
+            .headers()
+            .unwrap()
+            .iter()
+            .map(str::to_string)
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            headers,
+            vec![
+                "niche",
+                "gene",
+                "mean_niche",
+                "mean_rest",
+                "log2fc",
+                "z_score",
+                "p_value",
+                "q_value_bh",
+            ]
+        );
+
+        let _ = fs::remove_file(&path);
+    }
+
     fn sample_adata() -> AnnData {
         AnnData {
             obs_names: vec!["cell1".to_string(), "cell2".to_string()],
@@ -1044,6 +1162,7 @@ mod tests {
                 vec!["s1".to_string(), "s2".to_string()],
             )]),
             expression: None,
+            sparse_expression: None,
             embeddings: HashMap::new(),
         }
     }

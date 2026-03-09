@@ -2,7 +2,7 @@
 
 A fast command-line toolkit for spatial transcriptomics analysis, written in Rust.
 
-Reads `.h5ad` files and provides graph construction, interaction counting, composition profiling, NMF factorization, and spatial aggregation — all parallelized with Rayon.
+Reads `.h5ad` files and provides graph construction, interaction counting, composition profiling, NMF factorization, spatial aggregation, GMM niche detection, Moran's I, and pooled niche marker detection — all parallelized with Rayon.
 
 ---
 
@@ -11,7 +11,7 @@ Reads `.h5ad` files and provides graph construction, interaction counting, compo
 | Crate | Role |
 |---|---|
 | `spatialrs-io` | HDF5 reader: obs/var names, spatial coords, obsm embeddings, expression matrix X |
-| `spatialrs-core` | Algorithms: neighbors, interactions, composition, NMF, aggregation |
+| `spatialrs-core` | Algorithms: neighbors, interactions, composition, NMF, aggregation, GMM, Moran's I, markers |
 | `spatialrs-cli` | Binary: CLI wiring with Clap |
 
 ---
@@ -187,6 +187,32 @@ spatialrs gmm data.h5ad --nmf-w w_factors.csv -k 10 --groupby sample --output ni
 
 ---
 
+### `morans` — Moran's I over embedding dimensions or NMF components
+
+Computes global Moran's I within each sample/group for either an `obsm` embedding or NMF W factors.
+
+```bash
+spatialrs morans data.h5ad --nmf-w w_factors.csv --radius 75 --groupby sample --output morans.csv
+```
+
+Output columns: `feature, moran_i, expected_i, variance_i, z_score, group`
+
+---
+
+### `markers` — pooled niche marker genes
+
+Reads niche assignments from `spatialrs gmm`, aligns them to `obs_names`, and runs one-vs-rest Wilcoxon tests over the full expression matrix.
+
+```bash
+spatialrs markers data.h5ad --niche-csv niches.csv --output markers.csv
+```
+
+This command is intentionally **pooled across all cells**. It does not split by sample and its output is not group-labeled.
+
+Output columns: `niche, gene, mean_niche, mean_rest, log2fc, z_score, p_value, q_value_bh`
+
+---
+
 ## Input format
 
 Standard `.h5ad` files written by AnnData (Python).
@@ -201,6 +227,7 @@ Standard `.h5ad` files written by AnnData (Python).
 ## Design notes
 
 - **NMF and GMM run on all cells pooled** so that factor/niche indices are comparable across samples. `--groupby` only labels output records.
+- **`markers` also runs pooled** over all cells after aligning niche assignments to `obs_names`, so its output intentionally has no `group` column.
 - **`aggregate` runs per sample** because spatial coordinates are sample-local and neighbours should not cross sample boundaries.
 - Groups are processed in parallel with Rayon; spatial indexing uses an R* tree (`rstar`).
 - NMF element-wise updates use `ndarray::Zip::par_for_each` across rayon threads.

@@ -7,13 +7,15 @@ use serde::Serialize;
 
 #[derive(Serialize)]
 pub struct MarkerRecord {
-    pub niche:      usize,
-    pub gene:       String,
+    /// Marker output is intentionally pooled across all cells, so it does not
+    /// carry a `group` column like the per-sample spatial commands.
+    pub niche: usize,
+    pub gene: String,
     pub mean_niche: f64,
-    pub mean_rest:  f64,
-    pub log2fc:     f64,
-    pub z_score:    f64,
-    pub p_value:    f64,
+    pub mean_rest: f64,
+    pub log2fc: f64,
+    pub z_score: f64,
+    pub p_value: f64,
     pub q_value_bh: f64,
 }
 
@@ -25,10 +27,10 @@ pub struct MarkerRecord {
 /// The Mann-Whitney U statistic is standardised to a z-score under the normal
 /// approximation.  Benjamini-Hochberg FDR correction is applied per niche.
 pub fn find_niche_markers(
-    expression:   &Array2<f32>,
-    gene_names:   &[String],
+    expression: &Array2<f32>,
+    gene_names: &[String],
     niche_labels: &[usize],
-    n_niches:     usize,
+    n_niches: usize,
 ) -> Result<Vec<MarkerRecord>> {
     let (n_cells, n_genes) = expression.dim();
 
@@ -76,11 +78,11 @@ pub fn find_niche_markers(
                     .collect();
 
                 let mean_niche = niche_vals.iter().sum::<f64>() / niche_vals.len() as f64;
-                let mean_rest  = rest_vals.iter().sum::<f64>() / rest_vals.len() as f64;
+                let mean_rest = rest_vals.iter().sum::<f64>() / rest_vals.len() as f64;
                 // Pseudo-count to avoid log(0)
                 let log2fc = ((mean_niche + 1e-9) / (mean_rest + 1e-9)).log2();
-                let z      = wilcoxon_z(&niche_vals, &rest_vals);
-                let p      = two_tailed_p(z);
+                let z = wilcoxon_z(&niche_vals, &rest_vals);
+                let p = two_tailed_p(z);
 
                 (mean_niche, mean_rest, log2fc, z, p)
             })
@@ -127,10 +129,7 @@ fn wilcoxon_z(niche_vals: &[f64], rest_vals: &[f64]) -> f64 {
         .chain(rest_vals.iter().map(|&v| (v, false)))
         .collect();
 
-    combined.sort_by(|a, b| {
-        a.0.partial_cmp(&b.0)
-            .unwrap_or(std::cmp::Ordering::Equal)
-    });
+    combined.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
 
     let n = combined.len();
     let mut r1 = 0.0f64;
@@ -151,12 +150,16 @@ fn wilcoxon_z(niche_vals: &[f64], rest_vals: &[f64]) -> f64 {
         i = j;
     }
 
-    let u1          = r1 - (n1 * (n1 + 1)) as f64 / 2.0;
-    let expected_u  = (n1 * n2) as f64 / 2.0;
-    let variance_u  = (n1 * n2 * (n1 + n2 + 1)) as f64 / 12.0;
-    let std_u       = variance_u.sqrt();
+    let u1 = r1 - (n1 * (n1 + 1)) as f64 / 2.0;
+    let expected_u = (n1 * n2) as f64 / 2.0;
+    let variance_u = (n1 * n2 * (n1 + n2 + 1)) as f64 / 12.0;
+    let std_u = variance_u.sqrt();
 
-    if std_u < 1e-14 { 0.0 } else { (u1 - expected_u) / std_u }
+    if std_u < 1e-14 {
+        0.0
+    } else {
+        (u1 - expected_u) / std_u
+    }
 }
 
 /// Two-tailed p-value for a standard normal z-score.
@@ -169,13 +172,12 @@ fn two_tailed_p(z: f64) -> f64 {
     if z_abs < 1e-14 {
         return 1.0;
     }
-    let t    = 1.0 / (1.0 + 0.231_641_9 * z_abs);
-    let poly = t * (0.319_381_530
-        + t * (-0.356_563_782
-        + t * (1.781_477_937
-        + t * (-1.821_255_978
-        + t * 1.330_274_429))));
-    let pdf       = (-0.5 * z_abs * z_abs).exp() / (2.0 * std::f64::consts::PI).sqrt();
+    let t = 1.0 / (1.0 + 0.231_641_9 * z_abs);
+    let poly = t
+        * (0.319_381_530
+            + t * (-0.356_563_782
+                + t * (1.781_477_937 + t * (-1.821_255_978 + t * 1.330_274_429))));
+    let pdf = (-0.5 * z_abs * z_abs).exp() / (2.0 * std::f64::consts::PI).sqrt();
     let upper_tail = pdf * poly;
     (2.0 * upper_tail).min(1.0)
 }
@@ -224,7 +226,7 @@ mod tests {
         // Niche values clearly higher than rest → positive z
         // n1=3, n2=3: U1=9, E[U]=4.5, SD≈2.29 → z≈1.96
         let niche = vec![10.0, 11.0, 12.0];
-        let rest  = vec![1.0, 2.0, 3.0];
+        let rest = vec![1.0, 2.0, 3.0];
         let z = wilcoxon_z(&niche, &rest);
         assert!(z > 1.5, "expected positive z > 1.5, got {z}");
     }
@@ -271,13 +273,8 @@ mod tests {
         // 4 cells (2 per niche), 2 genes
         // Gene 0: niche 0 cells have value 10, niche 1 cells have value 0
         // Gene 1: uniform (no signal)
-        let expr = arr2(&[
-            [10.0f32, 1.0],
-            [10.0f32, 1.0],
-            [0.0f32,  1.0],
-            [0.0f32,  1.0],
-        ]);
-        let genes       = vec!["signal".to_string(), "noise".to_string()];
+        let expr = arr2(&[[10.0f32, 1.0], [10.0f32, 1.0], [0.0f32, 1.0], [0.0f32, 1.0]]);
+        let genes = vec!["signal".to_string(), "noise".to_string()];
         let niche_labels = vec![0, 0, 1, 1];
 
         let records = find_niche_markers(&expr, &genes, &niche_labels, 2).unwrap();
@@ -291,7 +288,13 @@ mod tests {
             .collect();
         assert_eq!(niche0.len(), 1);
         // n1=2, n2=2, perfect separation: U1=4, E[U]=2, SD≈1.29 → z≈1.55
-        assert!(niche0[0].z_score > 1.0, "expected positive z > 1.0 for niche 0 signal gene");
-        assert!(niche0[0].log2fc > 0.0, "expected positive log2fc for niche 0 signal gene");
+        assert!(
+            niche0[0].z_score > 1.0,
+            "expected positive z > 1.0 for niche 0 signal gene"
+        );
+        assert!(
+            niche0[0].log2fc > 0.0,
+            "expected positive log2fc for niche 0 signal gene"
+        );
     }
 }
