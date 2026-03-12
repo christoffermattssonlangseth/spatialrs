@@ -1,2 +1,4 @@
 /target/
 *.csv
+.DS_Store
+/projects/**/*.h5ad
