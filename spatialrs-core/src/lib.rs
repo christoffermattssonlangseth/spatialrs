@@ -1,4 +1,5 @@
 pub mod aggregation;
+pub mod svg;
 pub mod autocorr;
 pub mod composition;
 pub mod diff_composition;

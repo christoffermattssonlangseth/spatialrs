@@ -423,6 +423,56 @@ class TestHighlyVariableGenes:
         assert set(df["gene"]) == set(gene_names)
 
 
+# ─── spatially variable genes ────────────────────────────────────────────────
+
+class TestSpatiallyVariableGenes:
+    def test_keys(self, coords, expression, gene_names):
+        result = spatialrs.spatially_variable_genes(coords, expression, gene_names, RADIUS)
+        row = result[0]
+        assert {"gene", "mean_expr", "moran_i", "z_score", "p_value",
+                "q_value_bh", "spatial_variance_fraction", "rank", "group"} <= set(row.keys())
+
+    def test_one_row_per_gene(self, coords, expression, gene_names):
+        result = spatialrs.spatially_variable_genes(coords, expression, gene_names, RADIUS)
+        assert len(result) == len(gene_names)
+        assert {r["gene"] for r in result} == set(gene_names)
+
+    def test_sorted_by_q_value(self, coords, expression, gene_names):
+        result = spatialrs.spatially_variable_genes(coords, expression, gene_names, RADIUS)
+        q_values = [r["q_value_bh"] for r in result]
+        assert q_values == sorted(q_values)
+
+    def test_q_and_p_in_range(self, coords, expression, gene_names):
+        result = spatialrs.spatially_variable_genes(coords, expression, gene_names, RADIUS)
+        df = pd.DataFrame(result)
+        assert ((df["p_value"] >= 0) & (df["p_value"] <= 1)).all()
+        assert ((df["q_value_bh"] >= 0) & (df["q_value_bh"] <= 1)).all()
+
+    def test_svf_in_range(self, coords, expression, gene_names):
+        result = spatialrs.spatially_variable_genes(coords, expression, gene_names, RADIUS)
+        df = pd.DataFrame(result)
+        assert ((df["spatial_variance_fraction"] >= 0) &
+                (df["spatial_variance_fraction"] <= 1)).all()
+
+    def test_structured_gene_ranks_first(self, coords):
+        """A gene with a clear spatial gradient should rank above pure noise."""
+        rng = np.random.default_rng(42)
+        N = len(coords)
+        expr = np.zeros((N, 2), dtype=np.float64)
+        expr[:, 0] = coords[:, 0]  # x-gradient: spatially structured
+        expr[:, 1] = rng.standard_normal(N)  # noise
+        names = ["spatial", "noise"]
+        result = spatialrs.spatially_variable_genes(coords, expr, names, RADIUS)
+        assert result[0]["gene"] == "spatial"
+
+    def test_accepts_scipy_sparse(self, coords, expression, gene_names):
+        import scipy.sparse as sp
+        result = spatialrs.spatially_variable_genes(
+            coords, sp.csr_matrix(expression), gene_names, RADIUS
+        )
+        assert len(result) == len(gene_names)
+
+
 # ─── regression tests for codex review issues ────────────────────────────────
 
 class TestSparseFloat32:

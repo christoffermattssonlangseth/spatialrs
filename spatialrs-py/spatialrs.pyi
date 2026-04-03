@@ -428,6 +428,24 @@ def cross_ripley_l(
 
 # ─── preprocessing ────────────────────────────────────────────────────────────
 
+def spatially_variable_genes(
+    coords: Coords,
+    expression: Matrix,
+    gene_names: list[str],
+    radius: float,
+    group: str = "",
+) -> Table:
+    """
+    Detect spatially variable genes with genome-wide BH FDR correction.
+
+    Returns
+    -------
+    list[dict]  —  keys: gene, mean_expr, moran_i, z_score, p_value,
+                   q_value_bh, spatial_variance_fraction, rank, group
+        Sorted by q_value_bh ascending (most significant first).
+    """
+    ...
+
 def normalize_total(
     expression: Matrix,
     target_sum: float = 1e4,

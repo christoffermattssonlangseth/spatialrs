@@ -5,7 +5,7 @@ use spatialrs_core::{
     aggregation, autocorr, composition, gmm,
     interactions as srs_interactions,
     markers, neighbors, nmf, preprocess,
-    rings, ripley, transitions,
+    rings, ripley, svg, transitions,
     local_cor,
 };
 
@@ -1451,5 +1451,70 @@ fn spatialrs(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(filter_genes, m)?)?;
     m.add_function(wrap_pyfunction!(scale, m)?)?;
     m.add_function(wrap_pyfunction!(highly_variable_genes, m)?)?;
+    // SVG
+    m.add_function(wrap_pyfunction!(spatially_variable_genes, m)?)?;
     Ok(())
+}
+
+// ─── spatially variable genes ─────────────────────────────────────────────────
+
+/// Detect spatially variable genes (SVGs) with BH FDR correction.
+///
+/// For each gene the function computes:
+///
+/// * **Moran's I** — global spatial autocorrelation statistic.
+/// * **z_score** — analytical z-score under normality.
+/// * **p_value** — two-tailed p-value from the normal approximation.
+/// * **q_value_bh** — Benjamini-Hochberg FDR applied *across all genes*
+///   simultaneously.  This is the key difference from calling ``morans``
+///   per gene — the correction is valid for the whole transcriptome.
+/// * **spatial_variance_fraction** — fraction of each gene's total variance
+///   that is spatially structured (neighbourhood means variance / total
+///   variance).  High → gene expression clusters in space.  Complementary
+///   to Moran's I.
+/// * **rank** — rank by q_value_bh (ascending), ties broken by z_score.
+///
+/// Parameters
+/// ----------
+/// coords : np.ndarray, shape (N, 2), dtype float64
+/// expression : array-like, shape (N, G) — log-normalised counts
+/// gene_names : list[str], length G
+/// radius : float — neighbourhood radius in the same units as coords
+/// group : str, optional
+///
+/// Returns
+/// -------
+/// list[dict]  —  keys: gene, mean_expr, moran_i, z_score, p_value,
+///                q_value_bh, spatial_variance_fraction, rank, group
+///     Sorted by q_value_bh ascending (most significant first).
+///     Pass directly to ``pd.DataFrame()``.
+#[pyfunction]
+#[pyo3(signature = (coords, expression, gene_names, radius, group = ""))]
+fn spatially_variable_genes<'py>(
+    py: Python<'py>,
+    coords: PyReadonlyArray2<'py, f64>,
+    expression: Bound<'py, PyAny>,
+    gene_names: Vec<String>,
+    radius: f64,
+    group: &str,
+) -> PyResult<Bound<'py, PyList>> {
+    let c = coords_from_numpy(coords)?;
+    let expr = any_to_array2_f32(&expression)?;
+    let records = svg::compute_svg(&c, &expr, &gene_names, radius, group)
+        .map_err(to_py_err)?;
+    let list = PyList::empty_bound(py);
+    for r in records {
+        let d = PyDict::new_bound(py);
+        d.set_item("gene", r.gene)?;
+        d.set_item("mean_expr", r.mean_expr)?;
+        d.set_item("moran_i", r.moran_i)?;
+        d.set_item("z_score", r.z_score)?;
+        d.set_item("p_value", r.p_value)?;
+        d.set_item("q_value_bh", r.q_value_bh)?;
+        d.set_item("spatial_variance_fraction", r.spatial_variance_fraction)?;
+        d.set_item("rank", r.rank)?;
+        d.set_item("group", r.group)?;
+        list.append(d)?;
+    }
+    Ok(list)
 }

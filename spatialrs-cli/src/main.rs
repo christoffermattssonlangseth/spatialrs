@@ -20,6 +20,7 @@ use spatialrs_core::{
     neighbors::{compute_graph_stats, knn_graph, radius_graph, EdgeRecord, GraphStatsRecord},
     nmf::{run_nmf, run_nmf_sparse, HRecord, NmfConfig, WRecord},
     ripley::{compute_cross_ripley, compute_ripley, CrossRipleyRecord, RipleyRecord},
+    svg::{compute_svg, SvgRecord},
     transitions::{compute_transitions, permute_transitions, TransitionRecord, TransitionStatsRecord},
 };
 use spatialrs_io::{read_h5ad, AnnData};
@@ -1103,7 +1104,7 @@ fn main() -> Result<()> {
                 &input,
                 &[&groupby],
                 &[],
-                true, // load dense expression
+                true,
                 false,
                 var_filter.as_deref(),
                 layer.as_deref(),
@@ -1114,19 +1115,17 @@ fn main() -> Result<()> {
                 .as_ref()
                 .context("expression matrix not loaded")?;
 
-            // Convert f32 expression to f64 for autocorr functions
-            let values: Array2<f64> = expression.mapv(|v| v as f64);
-            let feature_names = adata.var_names.clone();
+            let gene_names = adata.var_names.clone();
 
             let groups = partition_by_group(&adata, &groupby)?;
             let pb = group_bar(groups.len(), "svg");
-            let records: Vec<MoranRecord> = groups
+            let records: Vec<SvgRecord> = groups
                 .par_iter()
                 .progress_with(pb)
                 .map(|(label, indices)| {
                     let coords = extract_coords_subset(&adata, indices);
-                    let vals_sub = values.select(ndarray::Axis(0), indices);
-                    compute_morans_i(&coords, &vals_sub, &feature_names, radius, label)
+                    let expr_sub = expression.select(ndarray::Axis(0), indices);
+                    compute_svg(&coords, &expr_sub, &gene_names, radius, label)
                 })
                 .collect::<Result<Vec<_>>>()?
                 .into_iter()
