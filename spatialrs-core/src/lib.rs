@@ -5,6 +5,7 @@ pub mod diff_composition;
 pub mod diff_niches;
 pub mod gmm;
 pub mod interactions;
+pub mod local_cor;
 pub mod markers;
 pub mod neighbors;
 pub mod nmf;

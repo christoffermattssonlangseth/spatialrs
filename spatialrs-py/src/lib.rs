@@ -454,8 +454,6 @@ fn lisa<'py>(
         d.set_item("feature", r.feature)?;
         d.set_item("local_i", r.local_i)?;
         d.set_item("z_score", r.z_score)?;
-        d.set_item("p_value", r.p_value)?;
-        d.set_item("q_value_bh", r.q_value_bh)?;
         d.set_item("group", r.group)?;
         list.append(d)?;
     }
@@ -1354,19 +1352,17 @@ fn bivariate_morans<'py>(
 /// -------
 /// list[dict]  —  keys: cell_type, r, l_r, l_lo, l_hi, group
 #[pyfunction]
-#[pyo3(signature = (coords, cell_types, target_type, radii, n_sims = 199, seed = 42, group = ""))]
+#[pyo3(signature = (coords, cell_types, target_type, radii, group = ""))]
 fn ripley_l<'py>(
     py: Python<'py>,
     coords: PyReadonlyArray2<'py, f64>,
     cell_types: Vec<String>,
     target_type: &str,
     radii: Vec<f64>,
-    n_sims: usize,
-    seed: u64,
     group: &str,
 ) -> PyResult<Bound<'py, PyList>> {
     let c = coords_from_numpy(coords)?;
-    let records = ripley::ripley_envelope(&c, &cell_types, target_type, &radii, n_sims, seed, group)
+    let records = ripley::compute_ripley(&c, &cell_types, target_type, &radii, group)
         .map_err(to_py_err)?;
     let list = PyList::empty_bound(py);
     for r in records {
@@ -1374,8 +1370,6 @@ fn ripley_l<'py>(
         d.set_item("cell_type", r.cell_type)?;
         d.set_item("r", r.r)?;
         d.set_item("l_r", r.l_r)?;
-        d.set_item("l_lo", r.l_lo)?;
-        d.set_item("l_hi", r.l_hi)?;
         d.set_item("group", r.group)?;
         list.append(d)?;
     }
@@ -1391,7 +1385,7 @@ fn ripley_l<'py>(
 /// -------
 /// list[dict]  —  keys: type_a, type_b, r, l_cross, l_lo, l_hi, group
 #[pyfunction]
-#[pyo3(signature = (coords, cell_types, type_a, type_b, radii, n_sims = 199, seed = 42, group = ""))]
+#[pyo3(signature = (coords, cell_types, type_a, type_b, radii, group = ""))]
 fn cross_ripley_l<'py>(
     py: Python<'py>,
     coords: PyReadonlyArray2<'py, f64>,
@@ -1399,12 +1393,10 @@ fn cross_ripley_l<'py>(
     type_a: &str,
     type_b: &str,
     radii: Vec<f64>,
-    n_sims: usize,
-    seed: u64,
     group: &str,
 ) -> PyResult<Bound<'py, PyList>> {
     let c = coords_from_numpy(coords)?;
-    let records = ripley::cross_ripley_envelope(&c, &cell_types, type_a, type_b, &radii, n_sims, seed, group)
+    let records = ripley::compute_cross_ripley(&c, &cell_types, type_a, type_b, &radii, group)
         .map_err(to_py_err)?;
     let list = PyList::empty_bound(py);
     for r in records {
@@ -1413,8 +1405,6 @@ fn cross_ripley_l<'py>(
         d.set_item("type_b", r.type_b)?;
         d.set_item("r", r.r)?;
         d.set_item("l_cross", r.l_cross)?;
-        d.set_item("l_lo", r.l_lo)?;
-        d.set_item("l_hi", r.l_hi)?;
         d.set_item("group", r.group)?;
         list.append(d)?;
     }

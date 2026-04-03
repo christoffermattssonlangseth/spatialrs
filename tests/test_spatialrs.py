@@ -149,7 +149,7 @@ class TestMorans:
 class TestLisa:
     def test_keys(self, coords, expression, gene_names):
         result = spatialrs.lisa(coords, BARCODES, expression, gene_names, RADIUS)
-        assert {"cell_i", "feature", "local_i", "z_score", "p_value", "q_value_bh", "group"} <= set(result[0].keys())
+        assert {"cell_i", "feature", "local_i", "z_score", "group"} <= set(result[0].keys())
 
     def test_row_count(self, coords, expression, gene_names):
         result = spatialrs.lisa(coords, BARCODES, expression, gene_names, RADIUS)
@@ -312,15 +312,15 @@ class TestRipleyL:
     def test_keys(self, coords):
         result = spatialrs.ripley_l(
             coords, CELL_TYPES, target_type="A",
-            radii=[5.0, 10.0, 20.0], n_sims=19, seed=0
+            radii=[5.0, 10.0, 20.0],
         )
-        assert {"cell_type", "r", "l_r", "l_lo", "l_hi", "group"} <= set(result[0].keys())
+        assert {"cell_type", "r", "l_r", "group"} <= set(result[0].keys())
 
     def test_one_row_per_radius(self, coords):
         radii = [5.0, 10.0, 20.0, 40.0]
         result = spatialrs.ripley_l(
             coords, CELL_TYPES, target_type="A",
-            radii=radii, n_sims=19, seed=0
+            radii=radii,
         )
         assert len(result) == len(radii)
 
@@ -329,9 +329,9 @@ class TestCrossRipleyL:
     def test_keys(self, coords):
         result = spatialrs.cross_ripley_l(
             coords, CELL_TYPES, type_a="A", type_b="B",
-            radii=[5.0, 10.0, 20.0], n_sims=19, seed=0
+            radii=[5.0, 10.0, 20.0],
         )
-        assert {"type_a", "type_b", "r", "l_cross", "l_lo", "l_hi", "group"} <= set(result[0].keys())
+        assert {"type_a", "type_b", "r", "l_cross", "group"} <= set(result[0].keys())
 
 
 # ─── preprocessing ────────────────────────────────────────────────────────────
