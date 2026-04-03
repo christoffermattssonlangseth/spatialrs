@@ -8,5 +8,7 @@ pub mod interactions;
 pub mod markers;
 pub mod neighbors;
 pub mod nmf;
+pub mod preprocess;
+pub mod rings;
 pub mod ripley;
 pub mod transitions;

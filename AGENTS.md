@@ -27,6 +27,8 @@ spatialrs/
 │   ├── aggregation.rs            Distance-weighted spatial aggregation
 │   ├── gmm.rs                    Gaussian mixture niche detection
 │   ├── autocorr.rs               Global Moran's I + permutation p-values + Geary's C + LISA + bivariate Moran's I
+│   ├── local_cor.rs              Per-cell local Pearson correlation within a radius neighbourhood
+│   ├── rings.rs                  Concentric-ring neighbourhood composition
 │   ├── transitions.rs            Niche spatial co-occurrence matrix + permutation test
 │   ├── ripley.rs                 Ripley's K / L + cross-K / cross-L
 │   ├── diff_niches.rs            Sample-level niche abundance differential test
@@ -76,6 +78,12 @@ To choose k, use `gmm-sweep` first:
 spatialrs gmm-sweep data.h5ad --agg agg.csv --k-min 2 --k-max 20 --output sweep.csv
 ```
 
+To choose the NMF rank, use `nmf-sweep` first:
+
+```bash
+spatialrs nmf-sweep data.h5ad --k-min 2 --k-max 20 --output nmf_sweep.csv
+```
+
 Downstream analysis after niche detection:
 
 ```bash
@@ -112,14 +120,24 @@ spatialrs ripley data.h5ad --cell-type cell_type --target-type "Tumor cell" \
     --r-min 10 --r-max 200 --groupby sample --output ripley.csv
 spatialrs cross-ripley data.h5ad --cell-type cell_type --type-a "T cell" --type-b "Tumor cell" \
     --r-min 10 --r-max 200 --groupby sample --output cross_ripley.csv
+spatialrs ripley-envelope data.h5ad --cell-type cell_type --target-type "Tumor cell" \
+    --r-min 10 --r-max 200 --groupby sample --output ripley_env.csv
+spatialrs cross-ripley-envelope data.h5ad --cell-type cell_type --type-a "T cell" --type-b "Tumor cell" \
+    --r-min 10 --r-max 200 --groupby sample --output cross_ripley_env.csv
 
 # Neighbourhood composition and entropy
 spatialrs composition data.h5ad --cell-type cell_type --radius 50 --groupby sample \
     --output comp.csv --output-entropy entropy.csv
+spatialrs rings data.h5ad --cell-type cell_type --rings 0,25,50,100 --groupby sample \
+    --output rings.csv
 
 # Differential neighbourhood composition between conditions (cell level)
 spatialrs diff-composition data.h5ad --composition-csv comp.csv \
     --condition condition --group-a tumor --group-b normal --output diff.csv
+
+# Per-cell local correlation between two features
+spatialrs local-cor data.h5ad --feature-a X_scVI:0 --feature-b X_scVI:1 \
+    --radius 50 --groupby sample --output local_cor.csv
 ```
 
 Local helper scripts for these workflows now live under `scripts/`. If you adjust CLI flags or expected outputs, update the corresponding script(s) as part of the same change.
@@ -156,6 +174,8 @@ Uses `ndarray::Zip::par_for_each` for element-wise updates (requires `ndarray` r
 
 `NmfResult` carries `component_variances` (per-component ‖W[:,k]‖₂ × ‖H[k,:]‖₂ normalised to sum to 1) and `error_trajectory` (Vec of (iteration, error) checkpoints). Both are populated by `run_nmf` and `run_nmf_sparse`.
 
+`nmf-sweep` lives in the CLI and loops over `k` values sequentially, outputting `NmfSweepRecord` rows; no separate core module is needed beyond `run_nmf_sweep` / `run_nmf_sweep_sparse`.
+
 ### GMM
 EM algorithm in `spatialrs-core/src/gmm.rs`. E-step is parallelized over cells with rayon. Variances are always stored as `Array2<f64>` of shape `(K, D)` — for spherical covariance, all columns in a row hold the same scalar. K-means++ initialisation. Convergence checked every iteration on log-likelihood change. Outputs hard labels (`labels: Vec<usize>`) and soft responsibilities (`Array2<f64>` N×K), plus `bic` and `aic`.
 
@@ -175,6 +195,8 @@ EM algorithm in `spatialrs-core/src/gmm.rs`. E-step is parallelized over cells w
 - `compute_cross_ripley` — bivariate K_AB(r)/L_AB(r); bounding box covers both type A and B cells. When `type_a == type_b` self-pairs are excluded via a `same_type` flag inside the query filter.
 
 Both use bounding-box area clamped to 1.0 as the CSR reference area.
+
+`ripley.rs` also provides `ripley_envelope` and `cross_ripley_envelope`, which generate simulation envelopes for the corresponding statistics in the CLI `ripley-envelope` and `cross-ripley-envelope` subcommands.
 
 ### Geary's C
 `compute_gearys_c` in `autocorr.rs` follows the same graph-build pattern as `compute_morans_i`. Formula: `C = ((n-1)/S₀) × Σ_edge (zᵢ-zⱼ)² / Σ zᵢ²`. Variance: `[(2S₁+S₂)(n-1) - 4S₀²] / [2(n+1)S₀²]`. For binary symmetric weights: S₁=2S₀, S₂=4Σdegᵢ². C < 1 = positive autocorrelation; C > 1 = negative (opposite direction to Moran's I z-score).
@@ -202,6 +224,17 @@ The `Svg` CLI subcommand loads the expression matrix (`load_expression: true`), 
 
 ### Summarize
 `Summarize` in the CLI reads a niche CSV (no h5ad), groups by `group` column, counts cells per niche, and emits `NicheSummaryRecord`. Sorted by (group, niche) for stable output.
+
+### Local correlation
+`compute_local_cor` in `local_cor.rs` computes a per-cell Pearson correlation between two features inside each cell's radius neighbourhood. The neighbourhood includes the focal cell itself. `local_r` is `NaN` when fewer than 3 cells are present locally or when either feature has zero local variance.
+
+In the CLI, features may come from three sources:
+- bare gene name, e.g. `GAPDH`
+- obsm column spec, e.g. `X_pca:3`
+- NMF component spec with `--nmf-w`, e.g. `nmf:0`
+
+### Rings
+`compute_rings` in `rings.rs` computes per-cell neighbourhood composition over concentric distance bins. `ring_edges` must be strictly increasing and define half-open intervals `[inner, outer)`. With `--include-zeros`, the CLI emits zero-count rows for all observed cell types in every ring; otherwise zero-count combinations are omitted.
 
 ### Embedding sources in `aggregate`, `gmm`, `gmm-sweep`, `morans`, `geary`, `lisa`, and `bivariate-morans`
 These subcommands accept three embedding sources via CLI flags:
@@ -239,3 +272,5 @@ Both helper functions are in `spatialrs-cli/src/main.rs` and validate against ob
 - **Geary's C sign**: z_score < 0 means positive spatial autocorrelation (C < 1), opposite sign convention to Moran's I where z_score > 0 means positive. Keep this in mind when interpreting combined results.
 - **`diff-niches` vs `diff-composition`**: `diff-niches` operates at the **sample level** (one observation = one sample's niche fraction); `diff-composition` operates at the **cell level** (one observation = one cell's neighbourhood fraction). Use `diff-niches` for multi-sample comparisons; use `diff-composition` for single-sample conditions.
 - **Notebook execution state**: when editing `.ipynb` files, avoid leaving misleading cached outputs that no longer match the source cells. Prefer clean JSON with source-of-truth in the cell bodies.
+- **`local-cor` feature parsing**: specs containing `:` are interpreted as `obsm_key:column`, except `nmf:<component>` which requires `--nmf-w`. Bare strings are treated as gene names and therefore require loading the expression matrix.
+- **Ring boundaries**: `--rings` must define at least two edges and they must be strictly increasing. Distances are binned into half-open intervals `[edge_k, edge_{k+1})`, so points exactly on the upper boundary fall into the next ring.

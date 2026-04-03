@@ -118,6 +118,110 @@ pub fn aggregate_neighbors(
     Ok(records)
 }
 
+// ─── multiscale aggregation ───────────────────────────────────────────────────
+
+/// Aggregate an embedding at multiple spatial scales and concatenate the results.
+///
+/// This is the CellCharter-style niche detection workflow:
+///
+/// ```text
+/// result = [embedding (0-hop)] | [agg at radii[0]] | [agg at radii[1]] | ...
+/// ```
+///
+/// Each block has the same width D (embedding dims). The returned matrix has
+/// shape N × D*(1 + len(radii)) when `include_self=true`, or N × D*len(radii)
+/// otherwise.  Feed the result directly into `run_gmm` for compartment detection.
+pub fn multiscale_aggregate(
+    coords: &[[f64; 2]],
+    barcodes: &[String],
+    embedding: &Array2<f64>,
+    radii: &[f64],
+    include_self: bool,
+    weighting: &WeightingMode,
+) -> Result<Array2<f64>> {
+    if coords.len() != barcodes.len() {
+        bail!(
+            "coords length ({}) does not match barcodes length ({})",
+            coords.len(),
+            barcodes.len()
+        );
+    }
+    if coords.len() != embedding.nrows() {
+        bail!(
+            "coords length ({}) does not match embedding rows ({})",
+            coords.len(),
+            embedding.nrows()
+        );
+    }
+    for &r in radii {
+        if !r.is_finite() || r <= 0.0 {
+            bail!("all radii must be finite and > 0, got {r}");
+        }
+    }
+
+    let n = coords.len();
+    let d = embedding.ncols();
+    let n_blocks = radii.len() + usize::from(include_self);
+    let mut result = Array2::<f64>::zeros((n, d * n_blocks));
+
+    let mut col_offset = 0;
+
+    // 0-hop: copy the raw embedding unchanged
+    if include_self {
+        for i in 0..n {
+            for j in 0..d {
+                result[[i, j]] = embedding[[i, j]];
+            }
+        }
+        col_offset += d;
+    }
+
+    // Build the spatial index once, reuse across all radii
+    let points: Vec<IndexedPoint> = coords
+        .iter()
+        .enumerate()
+        .map(|(i, &c)| IndexedPoint { coords: c, index: i })
+        .collect();
+    let tree = RTree::bulk_load(points);
+
+    for &radius in radii {
+        let graph = GraphMode::Radius(radius);
+
+        // Aggregate each cell's neighbourhood in parallel
+        let agg_rows: Vec<Vec<f64>> = (0..n)
+            .into_par_iter()
+            .map(|i| {
+                let c = coords[i];
+                let neighbors = find_neighbors(&tree, &c, i, &graph);
+                let mut agg = vec![0.0f64; d];
+                if !neighbors.is_empty() {
+                    let weights: Vec<f64> = neighbors
+                        .iter()
+                        .map(|&(_, dist)| compute_weight(dist, weighting))
+                        .collect();
+                    let w_sum: f64 = weights.iter().sum();
+                    for (&(j, _), &w) in neighbors.iter().zip(weights.iter()) {
+                        let row = embedding.row(j);
+                        for k in 0..d {
+                            agg[k] += w * row[k] / w_sum;
+                        }
+                    }
+                }
+                agg
+            })
+            .collect();
+
+        for i in 0..n {
+            for j in 0..d {
+                result[[i, col_offset + j]] = agg_rows[i][j];
+            }
+        }
+        col_offset += d;
+    }
+
+    Ok(result)
+}
+
 // ─── helpers ──────────────────────────────────────────────────────────────────
 
 fn find_neighbors(

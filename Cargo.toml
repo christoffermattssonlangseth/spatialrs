@@ -3,6 +3,7 @@ members = [
     "spatialrs-core",
     "spatialrs-io",
     "spatialrs-cli",
+    "spatialrs-py",
 ]
 resolver = "2"
 
@@ -18,3 +19,4 @@ thiserror   = "2.0"
 clap        = { version = "4.5", features = ["derive"] }
 hdf5-metno  = { version = "0.12", features = ["blosc"] }
 indicatif   = { version = "0.17", features = ["rayon"] }
+pyo3        = "0.22"

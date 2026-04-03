@@ -1,0 +1,15 @@
+[package]
+name    = "spatialrs_py"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name       = "spatialrs"
+crate-type = ["cdylib"]
+
+[dependencies]
+pyo3            = { workspace = true, features = ["extension-module"] }
+numpy           = "0.22"
+spatialrs-core  = { path = "../spatialrs-core" }
+ndarray         = { workspace = true }
+anyhow          = { workspace = true }

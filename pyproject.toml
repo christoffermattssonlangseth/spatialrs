@@ -1,0 +1,22 @@
+[build-system]
+requires = ["maturin>=1.7,<2.0"]
+build-backend = "maturin"
+
+[project]
+name = "spatialrs"
+requires-python = ">=3.9"
+description = "Fast spatial transcriptomics analysis — Rust core with Python bindings"
+classifiers = [
+    "Programming Language :: Rust",
+    "Programming Language :: Python :: Implementation :: CPython",
+    "Topic :: Scientific/Engineering :: Bio-Informatics",
+]
+dynamic = ["version"]
+
+[tool.maturin]
+features        = ["pyo3/extension-module"]
+manifest-path   = "spatialrs-py/Cargo.toml"
+
+[tool.pytest.ini_options]
+addopts = "-p no:napari"
+testpaths = ["tests"]
